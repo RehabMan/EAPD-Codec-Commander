@@ -28,12 +28,6 @@ void* _org_rehabman_dontstrip_[] =
 	(void*)&OSKextGetCurrentVersionString,
 };
 
-// Define variables for EAPD state updating
-UInt8 eapdCapableNodes[MAX_EAPD_NODES];
-
-bool eapdPoweredDown, coldBoot;
-UInt8 hdaCurrentPowerState, hdaPrevPowerState;
-
 // Define usable power states
 static IOPMPowerState powerStateArray[ kPowerStateCount ] =
 {
@@ -59,10 +53,10 @@ bool CodecCommander::init(OSDictionary *dictionary)
     mWorkLoop = NULL;
     mTimer = NULL;
     
-    eapdPoweredDown = true;
-    coldBoot = true; // assume booting from cold since hibernate is broken on most hacks
-    hdaCurrentPowerState = 0x0; // assume hda codec has no power at cold boot
-    hdaPrevPowerState = hdaCurrentPowerState; //and previous state was the same
+    mEAPDPoweredDown = true;
+    mColdBoot = true; // assume booting from cold since hibernate is broken on most hacks
+    mHDACurrentPowerState = 0x0; // assume hda codec has no power at cold boot
+    mHDAPrevPowerState = mHDACurrentPowerState; //and previous state was the same
 	
     return true;
 }
@@ -97,10 +91,11 @@ bool CodecCommander::start(IOService *provider)
 	if (mConfiguration->getUpdateNodes())
 	{
 		IOSleep(mConfiguration->getSendDelay()); // need to wait a bit until codec can actually respond to immediate verbs
-		int k = 0; // array index
 	
 		// Fetch Pin Capabilities from the range of nodes
-		DEBUG_LOG("CodecCommander: Getting EAPD supported node list (limited to %d)\n", MAX_EAPD_NODES);
+		DEBUG_LOG("CodecCommander: Getting EAPD supported node list\n");
+		
+		mEAPDCapableNodes = OSArray::withCapacity(0);
 	
 		for (int nodeId = mIntelHDA->getStartingNode(); nodeId <= mIntelHDA->getTotalNodes(); nodeId++)
 		{
@@ -115,9 +110,8 @@ bool CodecCommander::start(IOService *provider)
 			// if bit 16 is set in pincap - node supports EAPD
 			if (HDA_PINCAP_IS_EAPD_CAPABLE(response))
 			{
-				eapdCapableNodes[k] = nodeId;
-				k++;
-				IOLog("CodecCommander: NID=0x%02x supports EAPD, will update state after sleep\n", nodeId);
+				mEAPDCapableNodes->setObject(OSNumber::withNumber(nodeId, 8));
+				IOLog("CodecCommander: Node ID 0x%02x supports EAPD, will update state after sleep\n", nodeId);
 			}
 		}
 	
@@ -185,6 +179,8 @@ void CodecCommander::stop(IOService *provider)
 	// Free IntelHDA engine
 	mIntelHDA->~IntelHDA();
 	
+	OSSafeRelease(mEAPDCapableNodes);
+	
     PMstop();
     super::stop(provider);
 }
@@ -210,22 +206,22 @@ void CodecCommander::parseCodecPowerState()
 
 		if (powerState != NULL)
 		{
-			hdaCurrentPowerState = powerState->unsigned8BitValue();
+			mHDACurrentPowerState = powerState->unsigned8BitValue();
 
 			// if hda codec changed power state
-			if (hdaCurrentPowerState != hdaPrevPowerState)
+			if (mHDACurrentPowerState != mHDAPrevPowerState)
 			{
-				DEBUG_LOG("CodecCommander: cc - power state transition from %d to %d recorded\n", hdaPrevPowerState, hdaCurrentPowerState);
+				DEBUG_LOG("CodecCommander: cc - power state transition from %d to %d recorded\n", mHDAPrevPowerState, mHDACurrentPowerState);
 				
 				// store current power state as previous state for next workloop cycle
-				hdaPrevPowerState = hdaCurrentPowerState;
+				mHDAPrevPowerState = mHDACurrentPowerState;
 				// notify about codec power loss state
-				if (hdaCurrentPowerState == 0x0)
+				if (mHDACurrentPowerState == 0x0)
 				{
 					DEBUG_LOG("CodecCommander: HDA codec lost power\n");
 					handleStateChange(kStateSleep); // power down EAPDs properly
-					eapdPoweredDown = true;
-					coldBoot = false; //codec entered fugue state or sleep - no longer a cold boot
+					mEAPDPoweredDown = true;
+					mColdBoot = false; //codec entered fugue state or sleep - no longer a cold boot
 				}
 			}
 		}
@@ -247,7 +243,7 @@ void CodecCommander::onTimerAction()
     parseCodecPowerState();
 	
     // if no power after semi-sleep (fugue) state and power was restored - set EAPD bit
-	if (eapdPoweredDown && hdaCurrentPowerState != 0x0)
+	if (mEAPDPoweredDown && mHDACurrentPowerState != 0x0)
     {
         DEBUG_LOG("CodecCommander: cc: --> hda codec power restored\n");
 		handleStateChange(kStateWake);
@@ -319,13 +315,15 @@ void CodecCommander::setEAPD(UInt8 logicLevel)
         IOSleep(mConfiguration->getSendDelay());
 	
     // for nodes supporting EAPD bit 1 in logicLevel defines EAPD logic state: 1 - enable, 0 - disable
-    for (int i = 0; i < MAX_EAPD_NODES; i++)
-	{
-        if (eapdCapableNodes[i] != 0)
-			mIntelHDA->sendCommand(eapdCapableNodes[i], HDA_VERB_EAPDBTL_SET, logicLevel);
-    }
+	OSCollectionIterator* iterator = OSCollectionIterator::withCollection(mEAPDCapableNodes);
 	
-	eapdPoweredDown = false;
+	OSNumber* nodeId;
+	while ((nodeId = OSDynamicCast(OSNumber, iterator->getNextObject())))
+		mIntelHDA->sendCommand(nodeId->unsigned8BitValue(), HDA_VERB_EAPDBTL_SET, logicLevel);
+	
+	OSSafeRelease(iterator);
+	
+	mEAPDPoweredDown = false;
 }
 
 /******************************************************************************
@@ -344,7 +342,7 @@ void CodecCommander::performCodecReset()
      to overcome audio loss and jack sense problem after sleep with AppleHDA v2.6.0+
      */
 
-    if (!coldBoot)
+    if (!mColdBoot)
 	{
         DEBUG_LOG("CodecCommander: cc: --> resetting codec\n");
 		mIntelHDA->sendCommand(1, HDA_VERB_RESET, HDA_PARM_NULL);
@@ -354,7 +352,7 @@ void CodecCommander::performCodecReset()
         // forcefully set power state to D3
 		mIntelHDA->sendCommand(1, HDA_VERB_SET_PSTATE, HDA_PARM_PS_D3_HOT);
 		
-        eapdPoweredDown = true;
+        mEAPDPoweredDown = true;
         DEBUG_LOG("CodecCommander: cc: --> hda codec power restored\n");
     }
 }
@@ -369,8 +367,8 @@ IOReturn CodecCommander::setPowerState(unsigned long powerStateOrdinal, IOServic
 	{
         DEBUG_LOG("CodecCommander: cc: --> asleep\n");
 		handleStateChange(kStateSleep); // set EAPD logic level 0 to cause EAPD to power off properly
-        eapdPoweredDown = true;  // now it's powered down for sure
-        coldBoot = false;
+        mEAPDPoweredDown = true;  // now it's powered down for sure
+        mColdBoot = false;
 	}
 	else if (kPowerStateNormal == powerStateOrdinal)
 	{
@@ -379,7 +377,7 @@ IOReturn CodecCommander::setPowerState(unsigned long powerStateOrdinal, IOServic
         // issue codec reset at wake and cold boot
         performCodecReset();
         
-        if (eapdPoweredDown)
+        if (mEAPDPoweredDown)
             // set EAPD bit at wake or cold boot
 			handleStateChange(kStateWake);
 
@@ -387,7 +385,7 @@ IOReturn CodecCommander::setPowerState(unsigned long powerStateOrdinal, IOServic
         if (mConfiguration->getCheckInfinite())
 		{
             // if checking infinitely then make sure to delay workloop
-            if (coldBoot)
+            if (mColdBoot)
                 mTimer->setTimeoutMS(20000); // create a nasty 20sec delay for AudioEngineOutput to initialize
             // if we are waking it will be already initialized
             else

@@ -54,12 +54,6 @@ enum
 
 class CodecCommander : public IOService
 {
-	Configuration *mConfiguration = NULL;
-	IntelHDA *mIntelHDA = NULL;
-	
-	IOWorkLoop*			mWorkLoop = NULL;
-	IOTimerEventSource* mTimer = NULL;
-	
     typedef IOService super;
 	OSDeclareDefaultStructors(CodecCommander)
 
@@ -81,6 +75,18 @@ public:
 	
 	UInt32 executeCommand(UInt32 command);
 private:
+	Configuration *mConfiguration = NULL;
+	IntelHDA *mIntelHDA = NULL;
+	
+	IOWorkLoop*			mWorkLoop = NULL;
+	IOTimerEventSource* mTimer = NULL;
+	
+	// Define variables for EAPD state updating
+	OSArray* mEAPDCapableNodes = NULL;
+	
+	bool mEAPDPoweredDown, mColdBoot;
+	UInt8 mHDACurrentPowerState, mHDAPrevPowerState;
+
 	void handleStateChange(CodecCommanderState newState);
 	
 	// parse codec power state from ioreg
