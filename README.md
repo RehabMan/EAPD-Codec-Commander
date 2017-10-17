@@ -30,7 +30,7 @@ Custom Commands
 #### 2. 添加SSDT-ALC1220.dsl
 
 ### 2017-8-18 添加ALC256配置文件
-| 10ec_1220 | String | Realtek ALC256 |
+| 10ec_0256 | String | Realtek ALC256 |
 | --- | --- | --- |
 
 Custom Commands
