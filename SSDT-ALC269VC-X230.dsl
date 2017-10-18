@@ -28,10 +28,16 @@ DefinitionBlock ("", "SSDT", 1, "hack", "ALC269VC", 0)
                     "On Sleep", ">n",
                     "On Wake", ">y",
                 },
+                Package()
+                {
+                    // 0x14 SET_EAPD_BTLENABLE 0x2
+                    "Command", Buffer() { 0x01, 0x47, 0x0c, 0x02 },
+                    "On Init", ">y",
+                    "On Sleep", ">n",
+                    "On Wake", ">y",
+                },
             },
             "Perform Reset", ">n",
-            // This is from SSDT-AppleALC.dsl
-            "Perform Reset on External Wake", ">n",
             "Send Delay", 10,
             "Sleep Nodes", ">n",
         },
